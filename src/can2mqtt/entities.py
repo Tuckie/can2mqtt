@@ -741,3 +741,117 @@ class Alarm(StateMixin, CommandMixin, Entity):
         "code_disarm_requried": False,
         "code_trigger_required": False,
     }
+
+
+# Climate, see "Climate" in esphome-canopen OBJECT_DICTIONARY.md
+CLIMATE_MODES = ["off", "heat_cool", "cool", "heat", "fan_only", "dry", "auto"]
+CLIMATE_MODE_CODES = {mode.encode(): code for code, mode in enumerate(CLIMATE_MODES)}
+CLIMATE_ACTIONS = {
+    0: "off",
+    2: "cooling",
+    3: "heating",
+    4: "idle",
+    5: "drying",
+    6: "fan",
+    7: "defrosting",
+}
+
+# temperatures: UINT16 scaled to -327.67..327.67 degC (0.01 degC steps), 65535 unknown
+TEMPERATURE_MIN = -327.67
+TEMPERATURE_MAX = 327.67
+
+CLIMATE_CAP_CURRENT_TEMPERATURE = 1
+CLIMATE_CAP_TWO_POINT = 2
+CLIMATE_CAP_ACTION = 4
+
+
+def temperature_to_wire(value: float | bytes | str) -> int:
+    if isinstance(value, bytes):
+        value = value.decode()
+    return scale_to_wire(value, TEMPERATURE_MIN, TEMPERATURE_MAX, 65535)
+
+
+def temperature_from_wire(value: int) -> str:
+    value = scale_from_wire(value, TEMPERATURE_MIN, TEMPERATURE_MAX, 65535)
+    # "None" clears the value in Home Assistant's MQTT climate
+    return "None" if math.isnan(value) else f"{value:.2f}"
+
+
+def climate_mode_from_wire(value: int) -> str:
+    return CLIMATE_MODES[value] if value < len(CLIMATE_MODES) else "off"
+
+
+def climate_mode_to_wire(payload: bytes) -> int:
+    code = CLIMATE_MODE_CODES.get(payload.strip().lower())
+    if code is None:
+        raise ValueError(f"unknown climate mode {payload!r}")
+    return code
+
+
+@EntityRegistry.register
+class Climate(StateMixin, CommandMixin, Entity):
+    TYPE_ID = 11
+    VERSION = 1
+    TYPE_NAME = "climate"
+
+    @cached_property
+    def PROPS(self):
+        return {
+            "temperature_unit": "C",
+            "precision": 0.1,
+            "modes": CLIMATE_MODES,
+        }
+
+    def two_point(self):
+        return self.caps & CLIMATE_CAP_TWO_POINT
+
+    def states(self):
+        # order of the node's OD states (layout.py entity_state_kinds())
+        yield ("mode_state_topic", climate_mode_from_wire, datatypes.UNSIGNED8)
+        if self.two_point():
+            yield ("temperature_low_state_topic", temperature_from_wire, datatypes.UNSIGNED16)
+            yield ("temperature_high_state_topic", temperature_from_wire, datatypes.UNSIGNED16)
+        else:
+            yield ("temperature_state_topic", temperature_from_wire, datatypes.UNSIGNED16)
+        if self.caps & CLIMATE_CAP_ACTION:
+            yield ("action_topic", lambda v: CLIMATE_ACTIONS.get(v, "off"), datatypes.UNSIGNED8)
+        if self.caps & CLIMATE_CAP_CURRENT_TEMPERATURE:
+            yield ("current_temperature_topic", temperature_from_wire, datatypes.UNSIGNED16)
+
+    def commands(self):
+        # only mode and target temperatures are writable, in state order
+        yield ("mode_command_topic", climate_mode_to_wire, datatypes.UNSIGNED8)
+        if self.two_point():
+            yield ("temperature_low_command_topic", temperature_to_wire, datatypes.UNSIGNED16)
+            yield ("temperature_high_command_topic", temperature_to_wire, datatypes.UNSIGNED16)
+        else:
+            yield ("temperature_command_topic", temperature_to_wire, datatypes.UNSIGNED16)
+
+    def canopen_metadata_properties(self):
+        yield 1, "name"
+        yield 7, "min_temp"
+        yield 8, "max_temp"
+        yield 9, "modes"
+        yield 10, "temp_step"
+
+    def set_metadata_property(self, key, value):
+        if key == 9:
+            modes = [mode for code, mode in enumerate(CLIMATE_MODES) if value & (1 << code)]
+            logger.debug("\tmodes 9: %s", modes)
+            self.set_property("modes", modes or CLIMATE_MODES)
+            return
+        if key in (7, 8, 10) and isinstance(value, float) and math.isnan(value):
+            return
+        super().set_metadata_property(key, value)
+
+    def setup_object_dictionary(self, node, base_index):
+        super().setup_object_dictionary(node, base_index)
+        for sub, name, data_type in (
+            (7, "min_temp", datatypes.REAL32),
+            (8, "max_temp", datatypes.REAL32),
+            (9, "modes", datatypes.UNSIGNED32),
+            (10, "temp_step", datatypes.REAL32),
+        ):
+            v = ODVariable(name, base_index, sub)
+            v.data_type = data_type
+            node.object_dictionary[base_index].add_member(v)

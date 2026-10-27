@@ -1,3 +1,7 @@
+# Unreleased
+- climate entities (esphome-canopen entity type 11): mode, target temperature or low / high
+  set points, action and current temperature, as Home Assistant MQTT climates
+
 # v0.2.12 - 2026-10-26
 - faster startup: read the TPDO configuration during the pause before publishing initial
   states instead of waiting idle

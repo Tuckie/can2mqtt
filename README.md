@@ -5,7 +5,7 @@ ESP32 comes with integrated CAN Bus controller. ESPHome [provides](https://espho
 This project tries to fill the gap and provides tools for easy exposing ESPHome entities to Home Assistant over CAN Bus:
 
 * It provides `can2mqtt` bridge exposing ESPHome CANopen entities onto MQTT topics. It follows MQTT Discovery protocol, so entities appear automatically in HomeAssistant.
-* The [esphome-canopen](https://github.com/mrk-its/esphome-canopen) project converts ESPHome device into CANopen node, exporting selected entities over CAN by mapping them to CANopen object dictionary. It also allows to define TPDOs for sending entity state on change. Currently following entity types are supported: `sensor`, `number`, `binary_sensor`, `switch`, `cover` (with optional position / tilt), `light` (with optional brightness / color temperature) and `alarm_control_panel`. Entity metadata is also published in Object Dictionary enabling autodiscovery.
+* The [esphome-canopen](https://github.com/mrk-its/esphome-canopen) project converts ESPHome device into CANopen node, exporting selected entities over CAN by mapping them to CANopen object dictionary. It also allows to define TPDOs for sending entity state on change. Currently following entity types are supported: `sensor`, `number`, `binary_sensor`, `switch`, `cover` (with optional position / tilt), `light` (with optional brightness / color temperature), `climate` and `alarm_control_panel`. Entity metadata is also published in Object Dictionary enabling autodiscovery.
 
 # How to start
 ## Hardware requirements
