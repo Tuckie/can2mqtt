@@ -1,6 +1,7 @@
 # Unreleased
 - climate entities (esphome-canopen entity type 11): mode, target temperature or low / high
-  set points, action and current temperature, as Home Assistant MQTT climates
+  set points, fan mode, swing mode, preset (with custom fan modes / presets), target and current
+  humidity, action and current temperature, as Home Assistant MQTT climates
 
 # v0.2.12 - 2026-10-26
 - faster startup: read the TPDO configuration during the pause before publishing initial

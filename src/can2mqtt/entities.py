@@ -745,7 +745,6 @@ class Alarm(StateMixin, CommandMixin, Entity):
 
 # Climate, see "Climate" in esphome-canopen OBJECT_DICTIONARY.md
 CLIMATE_MODES = ["off", "heat_cool", "cool", "heat", "fan_only", "dry", "auto"]
-CLIMATE_MODE_CODES = {mode.encode(): code for code, mode in enumerate(CLIMATE_MODES)}
 CLIMATE_ACTIONS = {
     0: "off",
     2: "cooling",
@@ -755,6 +754,33 @@ CLIMATE_ACTIONS = {
     6: "fan",
     7: "defrosting",
 }
+CLIMATE_FAN_MODES = [
+    "on",
+    "off",
+    "auto",
+    "low",
+    "medium",
+    "high",
+    "middle",
+    "focus",
+    "diffuse",
+    "quiet",
+]
+CLIMATE_SWING_MODES = ["off", "both", "vertical", "horizontal"]
+CLIMATE_PRESETS = [
+    "none",
+    "home",
+    "away",
+    "boost",
+    "comfort",
+    "eco",
+    "sleep",
+    "activity",
+]
+# codes of custom fan modes / presets start here (after the standard ones)
+CLIMATE_CUSTOM_FAN_MODE_BASE = 10
+CLIMATE_CUSTOM_PRESET_BASE = 8
+CLIMATE_CODE_NONE = 255
 
 # temperatures: UINT16 scaled to -327.67..327.67 degC (0.01 degC steps), 65535 unknown
 TEMPERATURE_MIN = -327.67
@@ -763,12 +789,30 @@ TEMPERATURE_MAX = 327.67
 CLIMATE_CAP_CURRENT_TEMPERATURE = 1
 CLIMATE_CAP_TWO_POINT = 2
 CLIMATE_CAP_ACTION = 4
+CLIMATE_CAP_FAN_MODE = 8
+CLIMATE_CAP_SWING_MODE = 16
+CLIMATE_CAP_PRESET = 32
+CLIMATE_CAP_CURRENT_HUMIDITY = 64
+CLIMATE_CAP_TARGET_HUMIDITY = 128
+
+# metadata subindices
+CLIMATE_META_MODES = 9
+CLIMATE_META_TEMP_STEP = 10
+CLIMATE_META_FAN_MODES = 11
+CLIMATE_META_SWING_MODES = 12
+CLIMATE_META_PRESETS = 13
+CLIMATE_META_CUSTOM_FAN_MODES = 14
+CLIMATE_META_CUSTOM_PRESETS = 15
+CLIMATE_META_MIN_HUMIDITY = 16
+CLIMATE_META_MAX_HUMIDITY = 17
+
+
+def _payload_str(value: float | bytes | str) -> str:
+    return value.decode() if isinstance(value, bytes) else str(value)
 
 
 def temperature_to_wire(value: float | bytes | str) -> int:
-    if isinstance(value, bytes):
-        value = value.decode()
-    return scale_to_wire(value, TEMPERATURE_MIN, TEMPERATURE_MAX, 65535)
+    return scale_to_wire(_payload_str(value), TEMPERATURE_MIN, TEMPERATURE_MAX, 65535)
 
 
 def temperature_from_wire(value: int) -> str:
@@ -777,15 +821,42 @@ def temperature_from_wire(value: int) -> str:
     return "None" if math.isnan(value) else f"{value:.2f}"
 
 
+def humidity_to_wire(value: float | bytes | str) -> int:
+    return scale_to_wire(_payload_str(value), 0, 254, 255)
+
+
+def humidity_from_wire(value: int) -> str:
+    value = scale_from_wire(value, 0, 254, 255)
+    return "None" if math.isnan(value) else f"{value:.0f}"
+
+
 def climate_mode_from_wire(value: int) -> str:
     return CLIMATE_MODES[value] if value < len(CLIMATE_MODES) else "off"
 
 
+def _name_to_code(payload, names, custom=(), custom_base=None):
+    name = _payload_str(payload).strip()
+    if name.lower() in names:
+        return names.index(name.lower())
+    if name in custom:
+        return custom_base + custom.index(name)
+    raise ValueError(
+        f"unknown value {name!r}, valid: {', '.join(list(names) + list(custom))}"
+    )
+
+
 def climate_mode_to_wire(payload: bytes) -> int:
-    code = CLIMATE_MODE_CODES.get(payload.strip().lower())
-    if code is None:
-        raise ValueError(f"unknown climate mode {payload!r}")
-    return code
+    return _name_to_code(payload, CLIMATE_MODES)
+
+
+def _mask_names(mask, names):
+    return [name for code, name in enumerate(names) if mask & (1 << code)]
+
+
+def _split_names(value):
+    if isinstance(value, bytes):
+        value = value.decode("utf-8")
+    return [name for name in (value or "").split("\n") if name]
 
 
 @EntityRegistry.register
@@ -793,6 +864,11 @@ class Climate(StateMixin, CommandMixin, Entity):
     TYPE_ID = 11
     VERSION = 1
     TYPE_NAME = "climate"
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.custom_fan_modes = []
+        self.custom_presets = []
 
     @cached_property
     def PROPS(self):
@@ -802,56 +878,207 @@ class Climate(StateMixin, CommandMixin, Entity):
             "modes": CLIMATE_MODES,
         }
 
-    def two_point(self):
-        return self.caps & CLIMATE_CAP_TWO_POINT
+    def has(self, cap):
+        return bool(self.caps & cap)
+
+    # wire <-> MQTT payloads of fan modes / presets, custom names from the node metadata
+
+    def fan_mode_from_wire(self, value):
+        if value < len(CLIMATE_FAN_MODES):
+            return CLIMATE_FAN_MODES[value]
+        pos = value - CLIMATE_CUSTOM_FAN_MODE_BASE
+        return (
+            self.custom_fan_modes[pos] if 0 <= pos < len(self.custom_fan_modes) else ""
+        )
+
+    def fan_mode_to_wire(self, payload):
+        return _name_to_code(
+            payload,
+            CLIMATE_FAN_MODES,
+            self.custom_fan_modes,
+            CLIMATE_CUSTOM_FAN_MODE_BASE,
+        )
+
+    def preset_from_wire(self, value):
+        if value < len(CLIMATE_PRESETS):
+            return CLIMATE_PRESETS[value]
+        pos = value - CLIMATE_CUSTOM_PRESET_BASE
+        # 255 (no preset) as "none", which Home Assistant shows as no preset
+        return (
+            self.custom_presets[pos] if 0 <= pos < len(self.custom_presets) else "none"
+        )
+
+    def preset_to_wire(self, payload):
+        return _name_to_code(
+            payload, CLIMATE_PRESETS, self.custom_presets, CLIMATE_CUSTOM_PRESET_BASE
+        )
+
+    @staticmethod
+    def swing_mode_from_wire(value):
+        return CLIMATE_SWING_MODES[value] if value < len(CLIMATE_SWING_MODES) else ""
+
+    @staticmethod
+    def swing_mode_to_wire(payload):
+        return _name_to_code(payload, CLIMATE_SWING_MODES)
+
+    def writable(self):
+        """(state topic, command topic, from wire, to wire, data type) of the writable states,
+        in the node's state / command order."""
+        yield (
+            "mode_state_topic",
+            "mode_command_topic",
+            climate_mode_from_wire,
+            climate_mode_to_wire,
+            datatypes.UNSIGNED8,
+        )
+        if self.has(CLIMATE_CAP_TWO_POINT):
+            yield (
+                "temperature_low_state_topic",
+                "temperature_low_command_topic",
+                temperature_from_wire,
+                temperature_to_wire,
+                datatypes.UNSIGNED16,
+            )
+            yield (
+                "temperature_high_state_topic",
+                "temperature_high_command_topic",
+                temperature_from_wire,
+                temperature_to_wire,
+                datatypes.UNSIGNED16,
+            )
+        else:
+            yield (
+                "temperature_state_topic",
+                "temperature_command_topic",
+                temperature_from_wire,
+                temperature_to_wire,
+                datatypes.UNSIGNED16,
+            )
+        if self.has(CLIMATE_CAP_FAN_MODE):
+            yield (
+                "fan_mode_state_topic",
+                "fan_mode_command_topic",
+                self.fan_mode_from_wire,
+                self.fan_mode_to_wire,
+                datatypes.UNSIGNED8,
+            )
+        if self.has(CLIMATE_CAP_SWING_MODE):
+            yield (
+                "swing_mode_state_topic",
+                "swing_mode_command_topic",
+                self.swing_mode_from_wire,
+                self.swing_mode_to_wire,
+                datatypes.UNSIGNED8,
+            )
+        if self.has(CLIMATE_CAP_PRESET):
+            yield (
+                "preset_mode_state_topic",
+                "preset_mode_command_topic",
+                self.preset_from_wire,
+                self.preset_to_wire,
+                datatypes.UNSIGNED8,
+            )
+        if self.has(CLIMATE_CAP_TARGET_HUMIDITY):
+            yield (
+                "target_humidity_state_topic",
+                "target_humidity_command_topic",
+                humidity_from_wire,
+                humidity_to_wire,
+                datatypes.UNSIGNED8,
+            )
 
     def states(self):
         # order of the node's OD states (layout.py entity_state_kinds())
-        yield ("mode_state_topic", climate_mode_from_wire, datatypes.UNSIGNED8)
-        if self.two_point():
-            yield ("temperature_low_state_topic", temperature_from_wire, datatypes.UNSIGNED16)
-            yield ("temperature_high_state_topic", temperature_from_wire, datatypes.UNSIGNED16)
-        else:
-            yield ("temperature_state_topic", temperature_from_wire, datatypes.UNSIGNED16)
-        if self.caps & CLIMATE_CAP_ACTION:
-            yield ("action_topic", lambda v: CLIMATE_ACTIONS.get(v, "off"), datatypes.UNSIGNED8)
-        if self.caps & CLIMATE_CAP_CURRENT_TEMPERATURE:
-            yield ("current_temperature_topic", temperature_from_wire, datatypes.UNSIGNED16)
+        for state_topic, _, from_wire, _, data_type in self.writable():
+            yield (state_topic, from_wire, data_type)
+        if self.has(CLIMATE_CAP_ACTION):
+            yield (
+                "action_topic",
+                lambda v: CLIMATE_ACTIONS.get(v, "off"),
+                datatypes.UNSIGNED8,
+            )
+        if self.has(CLIMATE_CAP_CURRENT_TEMPERATURE):
+            yield (
+                "current_temperature_topic",
+                temperature_from_wire,
+                datatypes.UNSIGNED16,
+            )
+        if self.has(CLIMATE_CAP_CURRENT_HUMIDITY):
+            yield ("current_humidity_topic", humidity_from_wire, datatypes.UNSIGNED8)
 
     def commands(self):
-        # only mode and target temperatures are writable, in state order
-        yield ("mode_command_topic", climate_mode_to_wire, datatypes.UNSIGNED8)
-        if self.two_point():
-            yield ("temperature_low_command_topic", temperature_to_wire, datatypes.UNSIGNED16)
-            yield ("temperature_high_command_topic", temperature_to_wire, datatypes.UNSIGNED16)
-        else:
-            yield ("temperature_command_topic", temperature_to_wire, datatypes.UNSIGNED16)
+        # only the writable states have commands, in state order
+        for _, command_topic, _, to_wire, data_type in self.writable():
+            yield (command_topic, to_wire, data_type)
+
+    def get_mqtt_config(self):
+        config = super().get_mqtt_config()
+        presets = config.pop("presets", [])  # not a Home Assistant option
+        if self.has(CLIMATE_CAP_FAN_MODE):
+            config["fan_modes"] = config.get("fan_modes", []) + self.custom_fan_modes
+        if self.has(CLIMATE_CAP_SWING_MODE):
+            config.setdefault("swing_modes", [])
+        if self.has(CLIMATE_CAP_PRESET):
+            # Home Assistant adds "none" (no preset) itself
+            config["preset_modes"] = [
+                p for p in presets if p != "none"
+            ] + self.custom_presets
+        return config
+
+    METADATA = {
+        1: ("name", datatypes.VISIBLE_STRING),
+        7: ("min_temp", datatypes.REAL32),
+        8: ("max_temp", datatypes.REAL32),
+        CLIMATE_META_MODES: ("modes", datatypes.UNSIGNED32),
+        CLIMATE_META_TEMP_STEP: ("temp_step", datatypes.REAL32),
+        CLIMATE_META_FAN_MODES: ("fan_modes", datatypes.UNSIGNED32),
+        CLIMATE_META_SWING_MODES: ("swing_modes", datatypes.UNSIGNED32),
+        CLIMATE_META_PRESETS: ("presets", datatypes.UNSIGNED32),
+        CLIMATE_META_CUSTOM_FAN_MODES: ("custom_fan_modes", datatypes.OCTET_STRING),
+        CLIMATE_META_CUSTOM_PRESETS: ("custom_presets", datatypes.OCTET_STRING),
+        CLIMATE_META_MIN_HUMIDITY: ("min_humidity", datatypes.REAL32),
+        CLIMATE_META_MAX_HUMIDITY: ("max_humidity", datatypes.REAL32),
+    }
 
     def canopen_metadata_properties(self):
-        yield 1, "name"
-        yield 7, "min_temp"
-        yield 8, "max_temp"
-        yield 9, "modes"
-        yield 10, "temp_step"
+        for sub, (name, _) in self.METADATA.items():
+            yield sub, name
 
     def set_metadata_property(self, key, value):
-        if key == 9:
-            modes = [mode for code, mode in enumerate(CLIMATE_MODES) if value & (1 << code)]
-            logger.debug("\tmodes 9: %s", modes)
-            self.set_property("modes", modes or CLIMATE_MODES)
+        masks = {
+            CLIMATE_META_MODES: ("modes", CLIMATE_MODES),
+            CLIMATE_META_FAN_MODES: ("fan_modes", CLIMATE_FAN_MODES),
+            CLIMATE_META_SWING_MODES: ("swing_modes", CLIMATE_SWING_MODES),
+            CLIMATE_META_PRESETS: ("presets", CLIMATE_PRESETS),
+        }
+        if key in masks:
+            prop, names = masks[key]
+            selected = _mask_names(value, names)
+            if prop == "modes" and not selected:
+                selected = CLIMATE_MODES  # nothing reported: offer all
+            logger.debug("\t%s %s: %s", prop, key, selected)
+            self.set_property(prop, selected)
             return
-        if key in (7, 8, 10) and isinstance(value, float) and math.isnan(value):
+        if key == CLIMATE_META_CUSTOM_FAN_MODES:
+            self.custom_fan_modes = _split_names(value)
+            return
+        if key == CLIMATE_META_CUSTOM_PRESETS:
+            self.custom_presets = _split_names(value)
+            return
+        if isinstance(value, float) and math.isnan(value):
             return
         super().set_metadata_property(key, value)
 
     def setup_object_dictionary(self, node, base_index):
         super().setup_object_dictionary(node, base_index)
-        for sub, name, data_type in (
-            (7, "min_temp", datatypes.REAL32),
-            (8, "max_temp", datatypes.REAL32),
-            (9, "modes", datatypes.UNSIGNED32),
-            (10, "temp_step", datatypes.REAL32),
-        ):
+        for sub, (name, data_type) in self.METADATA.items():
+            if sub in (1, 2):  # added by Entity
+                continue
+            if data_type == datatypes.OCTET_STRING:
+                node.object_dictionary[base_index].add_member(
+                    OctetString(name, base_index, sub)
+                )
+                continue
             v = ODVariable(name, base_index, sub)
             v.data_type = data_type
             node.object_dictionary[base_index].add_member(v)
